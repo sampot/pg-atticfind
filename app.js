@@ -1,74 +1,490 @@
-import { createGame, applyAction, getLegalActions, summarize, getOutcome } from "./game.js";
-import { GameAudio } from "./audio.js";
-import { loadProgress, saveProgress } from "./persist.js";
+/**
+ * 頂樓尋物 — UI：把 game.js 的純狀態畫成可點的場景。
+ * 一切確認／輸入都在頁內完成（不使用 alert／confirm／prompt）。
+ */
 
-const META={"id":"pg-atticfind","title":"閣樓尋物","tips":["依照下方清單，在場景中點選物件。","每找齊四件物品，就會推進一段故事。","錯點不扣分，慢慢觀察輪廓。"]};
-const LABELS={"room1":"客廳","room2":"暗房","room3":"鐘塔","inspect":"仔細搜查","code1947":"輸入 1947","code7491":"輸入 7491","find1":"黃銅物件","find2":"木質物件","find3":"紙上物件","find4":"紅色物件","placeA":"放置藍門","placeB":"放置橘門","fall":"墜落蓄力","launch":"穿門發射","reset":"重設雙門","next":"換下一人","dig":"分派挖掘","build":"分派搭橋","block":"分派阻擋","march":"人潮前進","up":"↑","right":"→","down":"↓","left":"←","target1":"鎖定 1","target2":"鎖定 2","target3":"鎖定 3","target4":"鎖定 4","target5":"鎖定 5","type":"輸入擊破","tick":"時間前進","lane1":"E","lane2":"A","lane3":"D","lane4":"G","wait":"空拍 +0.5s","prev":"上一詞","guess":"送出猜測","nextMatch":"下一場聯賽","suspect":"換嫌疑人","weapon":"換物證","room":"換房間","suggest":"提出建議","accuse":"正式指控","hunter":"獵人模式","hider":"匿者模式","scan":"掃描附近","answer1":"A","answer2":"B","answer3":"C","answer4":"D"};
-const $=(s)=>document.querySelector(s);
-const audio=new GameAudio();
-let state=META.id==="pg-worddawn"?createGame():createGame({seed:Date.now()%9973});
-let progress={};
-let recorded=false;
+import { sceneArt } from "./art.js";
+import { AtticAudio } from "./audio.js";
+import {
+  CHAPTERS,
+  EPILOGUE,
+  INTRO,
+  ITEMS,
+  NOTES,
+  RECIPIENTS,
+  SCENES,
+  SCENE_ORDER,
+  STORM_MAX,
+} from "./content.js";
+import * as G from "./game.js";
+import { loadProgress, mergeRecord, saveProgress } from "./persist.js";
 
-const esc=(v)=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const meter=(v)=>Math.max(0,Math.min(100,Number(v.meter??v.progress??0)));
-const usefulEntries=(v)=>Object.entries(v).filter(([k,val])=>!["msg","outcome","log","guesses","meter","score"].includes(k)&&["string","number"].includes(typeof val)).slice(0,4);
-const HOG_ITEMS=[["黃銅鑰匙","木雕小貓","紙扇","老照片"],["茶罐","郵票","收音機","收據"],["紅傘","車票","紅鐵盒","未寄出的信"]];
-const actionLabel=(action)=>META.id==="pg-worddawn"&&action==="next"?"下一詞":META.id==="pg-atticfind"&&action.startsWith("find")?HOG_ITEMS[state.scene][Number(action.at(-1))-1]:LABELS[action]||action;
+const $ = (id) => document.getElementById(id);
+const audio = new AtticAudio();
 
-function board(view){
-  const id=META.id;
-  if(id==="pg-lockroom")return `<div class="room-map">${["客廳","暗房","鐘塔"].map((n,i)=>`<div class="room ${state.room===i?"active":""}"><b>${["🕰","📷","⚙"][i]}</b><span>${n}</span></div>`).join("")}<span class="clue">${state.seen.length?"🔎":"?"}</span></div>`;
-  if(id==="pg-atticfind"){const icons=[["🔑","🐈","🪭","📷"],["🍵","✉️","📻","🧾"],["☂️","🎫","🧰","💌"]][state.scene];return `<div class="hog-scene">${icons.map((x,i)=>`<span class="object ${state.found.includes(state.scene+":"+i)?"found":""}">${x}</span>`).join("")}</div>`}
-  if(id==="pg-gatepair")return `<div class="lab" style="--speed:${state.momentum}"><i class="portal a"></i><i class="portal b"></i><i class="orb"></i><span class="lab-label">動量 ×${state.momentum} · ${esc(view.level)}</span></div>`;
-  if(id==="pg-festcrowd")return `<div class="route"><span class="temple">⛩️</span><i class="hazard"></i><div class="crowd">${state.crowd.map((p,i)=>`<span class="walker ${state.selected===i?"selected":""}" style="--x:${Math.max(0,p.x)}">${p.safe?"✨":p.job==="build"?"👷":p.job==="dig"?"⛏️":p.job==="block"?"🚧":"🚶"}</span>`).join("")}</div></div>`;
-  if(id==="pg-lighttrace"||id==="pg-huntshade"){const size=state.size||8,cells=[];for(let y=0;y<size;y++)for(let x=0;x<size;x++){let cl="cell",text="";if(id==="pg-lighttrace"){if(state.trail.includes(x+","+y))cl+=" trail";if(state.p.x===x&&state.p.y===y)cl+=" player";if(state.ai.x===x&&state.ai.y===y)cl+=" ai"}else{if(state.hunter.x===x&&state.hunter.y===y){cl+=" ai";text="◉"}for(const h of state.hiders)if(!h.caught&&h.x===x&&h.y===y&&(state.role==="hider"||Math.abs(state.hunter.x-x)+Math.abs(state.hunter.y-y)<=3)){cl+=" player";text="◐"}}cells.push(`<i class="${cl}">${text}</i>`)}return `<div class="grid" style="--size:${size}">${cells.join("")}</div>`}
-  if(id==="pg-typestorm")return `<div class="storm"><div class="city"></div>${state.words.map((w,i)=>`<span class="word-drop ${state.target===i?"target":""}" style="--i:${i};--y:${w.y}">${esc(w.w)}</span>`).join("")}</div>`;
-  if(id==="pg-stringbeat"){const next=state.index;return `<div class="lanes">${["E","A","D","G"].map((n,l)=>`<div class="lane" data-name="${n}">${Array.from({length:7},(_,j)=>{const note=state.index+j;const chartLane=(note*3+(note%7===0?1:0))%4;return chartLane===l?`<i class="note" style="--top:${Math.min(88,j*14)}%"></i>`:""}).join("")}</div>`).join("")}<i class="hitline"></i></div>`}
-  if(id==="pg-worddawn"){const rows=state.guesses.map(g=>{const [w,...marks]=g.split(" ");const m=marks.join("");return `<div class="guess-row">${[...w].map((x,i)=>`<i class="tile ${m.includes("🟩")&&[...m].filter(z=>z==="🟩"||z==="🟨"||z==="⬛")[i]==="🟩"?"green":[...m].filter(z=>z==="🟩"||z==="🟨"||z==="⬛")[i]==="🟨"?"yellow":"black"}">${x}</i>`).join("")}</div>`}).join("");return `<div class="word-board">${rows}${Array.from({length:6-state.guesses.length},()=>'<div class="guess-row">'+Array.from({length:5},()=>'<i class="tile"></i>').join("")+'</div>').join("")}<div class="candidate">${esc(view.guess)}</div><div class="keyboard">${"QWERTYUIOPASDFGHJKLZXCVBNM".split("").map(x=>`<span class="key">${x}</span>`).join("")}</div></div>`}
-  if(id==="pg-whodunit")return `<div class="caseboard"><div class="evidence"><span>嫌疑人 <b class="pin">●</b></span><strong>${esc(view.suspect)}</strong></div><div class="evidence"><span>物證</span><strong>${esc(view.weapon)}</strong></div><div class="evidence"><span>地點</span><strong>${esc(view.room)}</strong></div><div class="evidence"><span>我的手牌</span><strong>${state.hand.map(esc).join(" · ")}</strong></div></div>`;
-  if(id==="pg-quizleague"){const q=state.questions[Math.min(state.index,9)];return `<div class="quiz-stage"><div class="scoreboard"><div><span>YOU</span><strong>${state.score}</strong></div><div><span>AI</span><strong>${state.aiScore}</strong></div><div><span>ELO</span><strong>${state.rating}</strong></div></div><div class="question-card">${esc(q?.text||view.msg)}</div></div>`}
-  return `<div class="quiz-stage"><div class="question-card">${esc(view.msg)}</div></div>`;
+let state = G.createGame();
+let record = { sent: 0, bestScore: 0, bestRating: null };
+let confirmingRestart = false;
+let saveTimer = null;
+
+/* ---------- 存檔 ---------- */
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    void saveProgress({ save: G.serialize(state), record });
+  }, 350);
 }
 
-function detail(view){
-  if(META.id==="pg-quizleague"&&state.outcome==="playing"&&!state.betweenMatches){const q=state.questions[state.index];return q.choices.map((x,i)=>`${"ABCD"[i]} · ${esc(x)}`).join("<br>")}
-  const rows=[];
-  if(view.log)rows.push(...view.log);
-  if(view.guesses)rows.push(...view.guesses);
-  if(state.seen)rows.push(...state.seen.map(x=>"線索 · "+x.text));
-  if(state.inventory?.length)rows.push("物品欄 · "+state.inventory.join("、"));
-  return rows.length?rows.slice(-6).map(x=>`<div>• ${esc(x)}</div>`).join(""):"";
+function commitRecord() {
+  record = mergeRecord(record, {
+    phase: state.phase,
+    score: G.score(state),
+    rating: G.rating(state),
+  });
 }
 
-function render(){
-  const view=summarize(state),outcome=getOutcome(state);
-  $("#message").textContent=view.msg||"";
-  $("#progress").style.width=meter(view)+"%";
-  $("#board").innerHTML=board(view);
-  $("#details").innerHTML=detail(view);
-  const stats=usefulEntries(view);
-  if(!stats.some(([k])=>k==="score"))stats.push(["score",view.score||0]);
-  $("#hud").innerHTML=stats.slice(0,4).map(([k,v])=>`<div><span>${esc(k)}</span><strong>${esc(typeof v==="object"?JSON.stringify(v):v)}</strong></div>`).join("");
-  const actions=$("#actions");actions.innerHTML="";
-  for(const action of getLegalActions(state)){
-    const b=document.createElement("button");b.type="button";b.textContent=actionLabel(action);
-    if(action==="accuse")b.className="danger";
-    b.addEventListener("click",()=>move(action));actions.append(b);
+/* ---------- 動作 ---------- */
+
+function act(next) {
+  const before = state.phase;
+  state = next;
+  const sound = state.event?.sound;
+  if (sound) void audio.play(sound, sound === "solved" || sound === "sent" ? 0.7 : 1);
+  if (before === "playing" && state.phase !== "playing") commitRecord();
+  render();
+  scheduleSave();
+}
+
+/* ---------- 風雨計 ---------- */
+
+function renderGauge() {
+  const box = $("gauge");
+  box.hidden = false;
+  const share = state.storm / STORM_MAX;
+  $("gauge-label").textContent = G.stormStage(state);
+  $("gauge-fill").style.width = `${share * 100}%`;
+  $("gauge-read").textContent =
+    state.shelter > 0 ? `${state.storm}／${STORM_MAX}・加固 ${state.shelter}` : `${state.storm}／${STORM_MAX}`;
+  box.dataset.panic = String(state.storm >= STORM_MAX - 2);
+  $("rainfall").style.setProperty("--rain", String(share));
+  audio.duckBgm(share);
+}
+
+/* ---------- 場景 ---------- */
+
+function renderScenes() {
+  const host = $("scenes");
+  host.replaceChildren();
+  for (const id of SCENE_ORDER) {
+    const scene = SCENES[id];
+    const open = G.canEnter(state, id);
+    const left = G.pendingCount(state, id);
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "scene-tab";
+    tab.dataset.locked = String(!open);
+    if (id === state.scene) tab.setAttribute("aria-current", "true");
+    tab.innerHTML =
+      `<span>${scene.short}</span>` +
+      (!open
+        ? `<span class="lock" aria-hidden="true">🔒</span>`
+        : state.seen[id] && left > 0
+          ? `<span class="dot" aria-hidden="true">${left}</span>`
+          : "");
+    tab.setAttribute(
+      "aria-label",
+      open
+        ? `${scene.name}${state.seen[id] && left > 0 ? `，還有 ${left} 處可查` : ""}`
+        : `${scene.name}（還沒打通）`
+    );
+    tab.addEventListener("click", () => act(G.travel(state, id)));
+    host.append(tab);
   }
-  if(outcome!=="playing"){
-    const b=document.createElement("button");b.type="button";b.className="primary";b.textContent=outcome==="won"?"勝利 · 再玩一次":"重新挑戰";b.addEventListener("click",restart);actions.append(b);
-    if(!recorded){recorded=true;void record(view,outcome)}
+}
+
+function renderStage() {
+  const scene = SCENES[state.scene];
+  $("art").innerHTML = sceneArt(state.scene);
+  $("scene-name").textContent = scene.name;
+
+  const host = $("spots");
+  host.replaceChildren();
+  for (const spot of scene.hotspots) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "spot";
+    button.style.left = `${spot.cx}%`;
+    button.style.top = `${spot.cy}%`;
+    button.style.width = `${spot.w}%`;
+    button.style.height = `${spot.h}%`;
+    button.dataset.done = String(!G.spotPending(state, state.scene, spot));
+    button.dataset.armed = String(Boolean(state.selected));
+    button.dataset.gate = String(Boolean(spot.requires || spot.needsFlag));
+    button.setAttribute(
+      "aria-label",
+      state.selected ? `對${spot.name}使用${ITEMS[state.selected].name}` : `搜查${spot.name}`
+    );
+    button.innerHTML = `<span class="label">${spot.name}</span>`;
+    button.addEventListener("click", () => act(G.tapHotspot(state, spot.id)));
+    host.append(button);
   }
 }
 
-function move(action){audio.play(["launch","type","lane1","lane2","lane3","lane4"].includes(action)?"hit":"click");state=applyAction(state,action);render()}
-function restart(){state=createGame({seed:Date.now()%9973});recorded=false;audio.play("ok");render()}
-async function record(view,outcome){progress={...progress,bestScore:Math.max(progress.bestScore||0,view.score||0),wins:(progress.wins||0)+(outcome==="won"?1:0),rating:state.rating||progress.rating,lastPlayed:new Date().toISOString()};$("#best").textContent=String(progress.bestScore);await saveProgress(progress)}
+/* ---------- 章節／敘述 ---------- */
 
-$("#start").addEventListener("click",async()=>{await audio.start();audio.play("ok");$("#lobby").hidden=true;$("#game").hidden=false;render()});
-$("#sound").addEventListener("click",async()=>{const on=$("#sound").getAttribute("aria-pressed")!=="true";$("#sound").setAttribute("aria-pressed",String(on));$("#sound").textContent=on?"音樂：開":"音樂：關";audio.setEnabled(on);if(on)await audio.start()});
-$("#help").addEventListener("click",()=>{$("#sheet-title").textContent="怎麼玩";$("#sheet-body").innerHTML="<ol>"+META.tips.map(x=>"<li>"+esc(x)+"</li>").join("")+"</ol>";$("#sheet").hidden=false;$("#sheet-close").focus()});
-$("#sheet-close").addEventListener("click",()=>{$("#sheet").hidden=true;$("#help").focus()});
-document.addEventListener("keydown",e=>{if($("#game").hidden||getOutcome(state)!=="playing")return;const map={ArrowUp:"up",ArrowRight:"right",ArrowDown:"down",ArrowLeft:"left",w:"up",d:"right",s:"down",a:"left","1":"answer1","2":"answer2","3":"answer3","4":"answer4"};if(map[e.key]&&getLegalActions(state).includes(map[e.key])){e.preventDefault();move(map[e.key])}});
-progress=await loadProgress();if(META.id==="pg-quizleague"&&progress.rating)state.rating=progress.rating;$("#best").textContent=String(progress.bestScore||0);
+function renderChapter() {
+  const chapter = G.currentChapter(state);
+  $("chapter-title").textContent = chapter
+    ? `${chapter.title}　(${G.chapterNo(state)}／${CHAPTERS.length})`
+    : EPILOGUE.title;
+  $("chapter-goal").textContent = chapter ? chapter.goal : EPILOGUE.goal;
+}
+
+function renderNarration() {
+  const node = $("narration");
+  node.textContent = state.event?.text ?? "";
+  node.dataset.kind = state.event?.kind ?? "info";
+}
+
+function renderTutorial() {
+  const text = G.tutorialText(state);
+  const box = $("tutorial");
+  box.hidden = !text;
+  if (text) $("tutorial-text").textContent = text;
+}
+
+/* ---------- 背包 ---------- */
+
+function renderItems() {
+  const host = $("items");
+  host.replaceChildren();
+  if (state.inventory.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "empty-bag";
+    empty.textContent = "背包還是空的。點場景裡發亮的光點開始搜。";
+    host.append(empty);
+  }
+  for (const id of state.inventory) {
+    const item = ITEMS[id];
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "item";
+    button.setAttribute("aria-pressed", String(state.selected === id));
+    button.innerHTML = `<span class="glyph" aria-hidden="true">${item.icon}</span><span class="name">${item.name}</span>`;
+    button.addEventListener("click", () => act(G.tapItem(state, id)));
+    li.append(button);
+    host.append(li);
+  }
+  $("bag-hint").textContent = state.selected
+    ? `拿著「${ITEMS[state.selected].name}」——點光點使用，或點另一件道具組合`
+    : "點道具拿起來，再點光點使用；連點兩件可組合";
+}
+
+/* ---------- 面板 ---------- */
+
+function activeNotes() {
+  return NOTES.filter((note) => state.flags[note.flag]);
+}
+
+function sectionTitle(text) {
+  const node = document.createElement("p");
+  node.className = "section-title";
+  node.textContent = text;
+  return node;
+}
+
+function renderNotesPanel(body) {
+  const stat = G.progress(state);
+  body.append(
+    sectionTitle(
+      `第 ${stat.chapter}／${stat.chapterTotal} 章 · 已搜 ${stat.searched}／${stat.total} 處 · ` +
+        `走過 ${stat.scenes}／${stat.sceneTotal} 個場景 · 背包 ${stat.items} 件`
+    )
+  );
+
+  body.append(sectionTitle("抄到的線索"));
+  const list = document.createElement("ul");
+  list.className = "note-list";
+  const notes = activeNotes();
+  if (notes.length === 0) {
+    const li = document.createElement("li");
+    li.className = "empty-bag";
+    li.textContent = "還沒抄到任何可用的線索。";
+    list.append(li);
+  }
+  for (const note of notes) {
+    const li = document.createElement("li");
+    li.textContent = note.text;
+    list.append(li);
+  }
+  body.append(list);
+
+  body.append(sectionTitle("行動紀錄"));
+  const log = document.createElement("ul");
+  log.className = "log-list";
+  for (const entry of [...state.log].reverse().slice(0, 8)) {
+    const li = document.createElement("li");
+    li.dataset.kind = entry.kind;
+    li.textContent = entry.text;
+    log.append(li);
+  }
+  body.append(log);
+}
+
+function renderLetterPanel(body) {
+  const text = G.letterText(state);
+  const note = document.createElement("p");
+  note.className = "letter-paper";
+  note.textContent = text ?? "紅鐵盒還沒打開。";
+  body.append(note);
+}
+
+function renderHintPanel(body) {
+  const line = document.createElement("p");
+  line.className = "hint-text";
+  line.textContent = G.hint(state) ?? "這一局已經結束了。";
+  body.append(line);
+  body.append(sectionTitle("這一章要做的事"));
+  const goal = document.createElement("p");
+  goal.className = "hint-goal";
+  goal.textContent = G.currentChapter(state)?.goal ?? EPILOGUE.goal;
+  body.append(goal);
+}
+
+function renderWritePanel(body) {
+  const lead = document.createElement("p");
+  lead.className = "write-lead";
+  lead.textContent = G.canWriteName(state)
+    ? "信封是空白的。從線索本裡的每一條對起來，這封信該寄給誰？"
+    : "你手上的線索還不夠。挑一個名字寫下去，只會白白撕掉一個信封。";
+  body.append(lead);
+
+  const list = document.createElement("ul");
+  list.className = "name-list";
+  for (const person of RECIPIENTS) {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "name-choice";
+    button.disabled = state.wrongNames.includes(person.id);
+    button.innerHTML =
+      `<span class="name-main">${person.name}</span>` +
+      `<span class="name-side">${person.place} · ${person.note}</span>`;
+    button.addEventListener("click", () => act(G.writeName(state, person.id)));
+    li.append(button);
+    list.append(li);
+  }
+  body.append(list);
+
+  if (state.wrongNames.length > 0) {
+    body.append(sectionTitle(`已經寫壞 ${state.wrongNames.length} 個信封`));
+  }
+}
+
+function renderEndingPanel(body) {
+  const won = state.phase === "won";
+  const mark = document.createElement("p");
+  mark.className = "verdict-mark";
+  mark.dataset.lost = String(!won);
+  mark.textContent = won ? "寄出去了" : "沒能寄出去";
+  body.append(mark);
+
+  const text = document.createElement("p");
+  text.className = "verdict-text";
+  text.textContent = state.event?.text ?? "";
+  body.append(text);
+
+  const stat = G.progress(state);
+  body.append(
+    sectionTitle(
+      won
+        ? `評價「${G.rating(state)}」 · 分數 ${G.score(state)} · 線索 ${stat.notes} 條 · 行動 ${state.moves} 次`
+        : `走到第 ${stat.chapter} 章 · 搜過 ${stat.searched}／${stat.total} 處 · 行動 ${state.moves} 次`
+    )
+  );
+
+  const again = document.createElement("button");
+  again.type = "button";
+  again.className = "primary";
+  again.textContent = won ? "再爬一次頂樓" : "再試一次";
+  again.addEventListener("click", () => restart());
+  body.append(again);
+}
+
+const PANEL_TITLES = {
+  notes: "線索本",
+  letter: "那封信",
+  hint: "卡住了",
+  write: "寫信封",
+  ending: "這一局",
+};
+
+function renderPanel() {
+  const panel = $("panel");
+  if (!state.panel) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const body = $("panel-body");
+  body.replaceChildren();
+  $("panel-title").textContent = PANEL_TITLES[state.panel] ?? "";
+  if (state.panel === "notes") renderNotesPanel(body);
+  else if (state.panel === "letter") renderLetterPanel(body);
+  else if (state.panel === "hint") renderHintPanel(body);
+  else if (state.panel === "write") renderWritePanel(body);
+  else renderEndingPanel(body);
+  $("btn-panel-close").hidden = state.panel === "ending";
+}
+
+/** 重來會丟掉這一局，所以在頁內問一次（不使用 confirm）。 */
+function renderRestartConfirm() {
+  document.getElementById("confirm-strip")?.remove();
+  $("btn-restart").hidden = confirmingRestart;
+  if (!confirmingRestart) return;
+
+  const strip = document.createElement("div");
+  strip.id = "confirm-strip";
+  strip.className = "confirm-strip";
+  strip.innerHTML = `<span>重來會丟掉這一局的進度。</span>`;
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "ghost";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => {
+    confirmingRestart = false;
+    void audio.play("click");
+    render();
+  });
+
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "danger";
+  go.textContent = "確定重來";
+  go.addEventListener("click", () => restart());
+
+  strip.append(cancel, go);
+  $("toolbar").append(strip);
+  go.focus();
+}
+
+function render() {
+  renderChapter();
+  renderScenes();
+  renderStage();
+  renderNarration();
+  renderTutorial();
+  renderItems();
+  renderPanel();
+  renderRestartConfirm();
+  renderGauge();
+  $("notes-count").textContent = String(activeNotes().length);
+  $("btn-letter").hidden = !state.flags.readLetter;
+  $("btn-write").hidden = !G.isEpilogue(state) || state.phase !== "playing";
+}
+
+function restart() {
+  confirmingRestart = false;
+  state = G.skipTutorial(G.createGame());
+  void audio.play("door");
+  render();
+  scheduleSave();
+}
+
+/* ---------- 綁定 ---------- */
+
+function bind() {
+  $("btn-sound").addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    const on = button.getAttribute("aria-pressed") !== "true";
+    button.setAttribute("aria-pressed", String(on));
+    button.setAttribute("aria-label", on ? "關閉音效" : "開啟音效");
+    audio.setEnabled(on);
+    if (on) void audio.playBgm();
+  });
+
+  $("btn-tut-next").addEventListener("click", () => {
+    void audio.play("click");
+    state = G.advanceTutorial(state);
+    render();
+    scheduleSave();
+  });
+
+  $("btn-tut-skip").addEventListener("click", () => {
+    void audio.play("click");
+    state = G.skipTutorial(state);
+    render();
+    scheduleSave();
+  });
+
+  $("btn-notes").addEventListener("click", () => act(G.openPanel(state, "notes")));
+  $("btn-letter").addEventListener("click", () => act(G.openPanel(state, "letter")));
+  $("btn-hint").addEventListener("click", () => act(G.openPanel(state, "hint")));
+  $("btn-write").addEventListener("click", () => act(G.openPanel(state, "write")));
+  $("btn-panel-close").addEventListener("click", () => act(G.closePanel(state)));
+
+  $("btn-restart").addEventListener("click", () => {
+    confirmingRestart = true;
+    void audio.play("click");
+    render();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if ($("play").hidden || event.key !== "Escape") return;
+    if (confirmingRestart) {
+      confirmingRestart = false;
+      render();
+    } else if (state.panel && state.phase === "playing") act(G.closePanel(state));
+    else if (state.selected) act(G.tapItem(state, state.selected));
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      void saveProgress({ save: G.serialize(state), record });
+    }
+  });
+}
+
+async function enterGame() {
+  await audio.unlock();
+  void audio.playBgm();
+  void audio.preload();
+  $("intro").hidden = true;
+  $("play").hidden = false;
+  render();
+}
+
+async function boot() {
+  $("brief").textContent = INTRO;
+  bind();
+
+  const stored = await loadProgress();
+  record = mergeRecord(stored.record, null);
+  if (record.sent > 0) {
+    const line = $("record");
+    line.hidden = false;
+    line.textContent = `已經替阿嬤寄出 ${record.sent} 次 · 最高分 ${record.bestScore} · 最佳評價「${record.bestRating}」`;
+  }
+
+  const resumed = G.restore(stored.save);
+  const worthResuming = resumed && resumed.phase === "playing" && resumed.moves > 0;
+  if (worthResuming) {
+    const button = $("btn-continue");
+    button.hidden = false;
+    button.textContent = `接續上一次（${SCENES[resumed.scene].name}・第 ${G.chapterNo(resumed)} 章）`;
+    button.addEventListener("click", () => {
+      state = resumed;
+      void enterGame();
+    });
+  }
+
+  $("btn-start").addEventListener("click", () => {
+    state = G.createGame();
+    void enterGame();
+  });
+}
+
+void boot();
